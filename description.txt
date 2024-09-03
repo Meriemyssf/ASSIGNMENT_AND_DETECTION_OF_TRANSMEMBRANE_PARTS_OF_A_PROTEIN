@@ -1,3 +1,0 @@
-Description du dépot pour TP1 du cours de Cproj
-nom=YOUSSEF
-prénom=Meriem
