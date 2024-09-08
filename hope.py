@@ -1,15 +1,13 @@
 import argparse
 from Bio.PDB import PDBParser, DSSP
 import numpy as np
+import math
 import pymol
 import copy
 import sys
 
 # Constantes pour la liste des acides aminés hydrophobes
 HYDROPHOBICS_AMINO_ACIDS = ['PHE', 'GLY', 'ILE', 'LEU', 'MET', 'VAL', 'TRP', 'TYR']
-
-
-# ======================== Fonctions de Protein.py =========================
 
 def create_amino_acid(code, id_aa, x, y, z):
     """Créer un acide aminé et vérifier s'il est hydrophobe."""
@@ -22,27 +20,28 @@ def create_amino_acid(code, id_aa, x, y, z):
         'point': point
     }
 
+def create_protein(name, mass_center, amino_acid_sequence, full_sequence, best_positions):
+    return {
+        "name": name, 
+        "mass_center": None, 
+        "amino_acid_sequence": amino_acid_sequence, 
+        "full_sequence": full_sequence, 
+        "best_positions": best_positions
+    }
+
+def find_best_axis(protein):
+    best_axis_val = 0
+    best_axis_found = None
+    for axis in protein["best_positions"]:
+        if axis["best_hydrophobicity"] > best_axis_val:
+            best_axis_val = axis["best_hydrophobicity"]
+            best_axis_found = copy.deepcopy(axis)
+    return best_axis_found
 
 def compute_mass_center(chain):
-    """Calculer le centre de masse d'une chaîne de protéines à partir des atomes CA."""
-    total_mass = 0
-    weighted_sum = np.zeros(3)
-
-    atomic_masses = {'C': 12.01}
-
-    for residue in chain:
-        if residue.has_id("CA"):
-            atom = residue['CA']
-            mass = atomic_masses.get(atom.element, 1.0)
-            total_mass += mass
-            weighted_sum += mass * atom.get_coord()
-
-    if total_mass == 0:
-        raise ValueError("Aucun atome Cα trouvé dans la chaîne, impossible de calculer le centre de masse.")
-
-    center_of_mass = weighted_sum / total_mass
-    return center_of_mass
-
+    result = chain.center_of_mass()
+    x, y, z = result[0], result[1], result[2]
+    return np.array([x, y, z])
 
 def check_input_file(input_file):
     """Vérifier si le fichier d'entrée est un fichier PDB valide."""
@@ -66,33 +65,38 @@ def calculate_solvant_accessibility(structure, input_file):
     """Calculer l'accessibilité au solvant des résidus avec DSSP."""
     print("Computing solvent accessibility...")
     model = structure[0]
-    dssp = DSSP(model, input_file, dssp='mkdssp')
+    dssp = DSSP(model, input_file, dssp='dssp')
     return dssp
 
 
-def parse_pdb(input_file, chain='A'):
+def parse_pdb(input_file, chain):
     """Analyser le fichier PDB pour construire les informations de la protéine."""
     print("Parsing the PDB file ...")
     p = PDBParser()
     structure = p.get_structure("structure", input_file)
 
-    protein = {
-        'name': input_file.split('/')[-1].split('.')[0],
-        'mass_center': None,
-        'amino_acid_sequence': [],
-        'full_sequence': [],
-        'best_positions': []
-    }
+    id_amino_acid = 1  # Counting the accessible residues
+    id_full_amino_acid = 1  # Counting all residues
+    # Parsing the name
+    name = input_file[-8:]
+    name = name[:-4]
+    protein = create_protein(name=name, mass_center=None,  # Ce sera calculé plus tard
+        amino_acid_sequence=[],  # Initialiser la séquence vide
+        full_sequence=[],  # Initialiser la séquence complète vide
+        best_positions=[])
 
     # Calculer l'accessibilité au solvant
-    dssp_res = calculate_solvant_accessibility(structure, input_file)
+    dssp_res = calculate_solvant_accessibility(structure, input_file= input_file)
 
     print("Trimming to get only exposed residues...")
-    exposed_residues = [res_id for res_id, _, _, asa, *_ in dssp_res if asa > 0.3]
+    exposed_residues = []
+    for res_id, _, _, asa, _, _, _, _, _, _, _, _, _, _ in dssp_res:
+        if asa > 0.3:
+            exposed_residues.append(res_id)
     print(f"Found {len(exposed_residues)} exposed residues.")
 
     model = structure[0]
-    chain_selected = model[chain]
+    chain_selected = model["A"]
 
     # Calcul du centre de masse
     protein['mass_center'] = compute_mass_center(chain_selected)
@@ -103,16 +107,26 @@ def parse_pdb(input_file, chain='A'):
         if residue.has_id("CA"):
             atom = residue['CA']
             x, y, z = atom.get_coord()
-            new_amino_acid = create_amino_acid(residue.get_resname(), residue.get_id()[1], x, y, z)
+            new_amino_acid = create_amino_acid(code=residue.get_resname(), id_aa=residue.get_id()[1], x=x, y=y, z=z)
             protein['full_sequence'].append(new_amino_acid)
-            
+            id_full_amino_acid += 1
             if residue.get_id()[1] in exposed_residues:
                 protein['amino_acid_sequence'].append(new_amino_acid)
-
+                id_amino_acid += 1
     return protein
 
 
-# ===================== Fonctions de Geometry.py ===========================
+def get_x(point):
+    """Renvoie la coordonnée x d'un point"""
+    return point[0]
+
+def get_y(point):
+    """Renvoie la coordonnée y d'un point"""
+    return point[1]
+
+def get_z(point):
+    """Renvoie la coordonnée z d'un point"""
+    return point[2]
 
 def find_points(n_points, mass_center):
     """Générer des points répartis uniformément sur une demi-sphère."""
@@ -129,8 +143,9 @@ def find_points(n_points, mass_center):
             y = mass_center[1] + math.cos(theta)
             z = mass_center[2] + math.cos(phi) * math.sin(theta)
             points.append(np.array([x, y, z]))
-
-    return [point for point in points if point[2] > mass_center[2]]
+    # Get only the points from half circle :
+    above_x_axis_points = [point for point in points if point[2] > mass_center[2]]
+    return above_x_axis_points
 
 
 def find_director_vector(point, center_coordinate):
@@ -142,10 +157,27 @@ def find_director_vector(point, center_coordinate):
 
 def define_plane(point, normal_vector):
     """Définir un plan à partir d'un point et d'un vecteur normal."""
-    a, b, c = normal_vector
-    d = -(a * point[0] + b * point[1] + c * point[2])
+    a = normal_vector[0]
+    b = normal_vector[1]
+    c = normal_vector[2]
+    d = -(a * point[0] + b * point[1] + c * point[2])  # https://mathworld.wolfram.com/Plane.html
     return np.array([a, b, c, d])
 
+def get_plane_equation(plane):
+    """Renvoie l'équation d'un plan"""
+    return f"{plane[0]:.3f}x + {plane[1]:.3f}y + {plane[2]:.3f}z + {plane[3]:.3f} = 0"
+
+def complementary_plane(plane, gap):
+    """Crée un plan parallèle décalé d'un certain écart"""
+    new_plane = list(plane)
+    new_plane[3] += gap
+    return tuple(new_plane)
+
+def slide_plane(plane, sliding_window):
+    """Décale un plan d'une certaine valeur"""
+    plane = list(plane)
+    plane[3] += sliding_window
+    return tuple(plane)
 
 def is_point_above_plane(point, plane):
     """Vérifier si un point est au-dessus d'un plan."""
@@ -156,8 +188,17 @@ def is_point_below_plane(point, plane):
     """Vérifier si un point est en dessous d'un plan."""
     return np.dot(plane[:3], point) + plane[3] < 0
 
+def create_axis(plane1, plane2):
+    """Crée un axe"""
+    axis = {
+        'plane1': plane1,
+        'plane2': plane2,
+        'best_hydrophobicity': -1000,  # Hydrophobicité initialement faible
+        'best_ratio_of_atoms': 0
+    }
+    return axis
 
-def explore_axis(amino_acid_sequence, plane1, plane2, best_hydrophobicity):
+def explore_axis(amino_acid_sequence, plane1, plane2, ref_axe):
     """Explorer un axe et trouver la meilleure hydrophobicité relative."""
     in_between_planes = []
     n_total_hydrophobic = 0
@@ -183,13 +224,18 @@ def explore_axis(amino_acid_sequence, plane1, plane2, best_hydrophobicity):
             n_hydrophobe_in_plan += 1
 
     if not in_between_planes or len(in_between_planes) >= len(amino_acid_sequence):
-        return best_hydrophobicity, False
+        return False
 
     hydrophobicity = (nb_hydrophile_out_of_plan / n_total_hydrophile) + (n_hydrophobe_in_plan / n_total_hydrophobic)
-    if hydrophobicity > best_hydrophobicity:
-        return hydrophobicity, True
-
-    return best_hydrophobicity, False
+    if hydrophobicity > ref_axe['best_hydrophobicity']:
+        # Updating the "best" match
+        ref_axe['best_ratio_of_atoms'] = len(in_between_planes)
+        ref_axe['best_hydrophobicity'] = hydrophobicity
+        ref_axe['plane1'] = copy.deepcopy(axis['plane1'])
+        ref_axe['plane2'] = copy.deepcopy(axis['plane2'])
+        return True
+    else :      
+        return False
 
 
 def show_in_pymol(plane1, plane2, pdb_file, mass_center):
@@ -202,58 +248,86 @@ def show_in_pymol(plane1, plane2, pdb_file, mass_center):
     y_min, y_max = float("inf"), float("-inf")
 
     for atom in pymol.cmd.get_model("protein").atom:
-        x, y = atom.coord[:2]
-        x_min, x_max = min(x_min, x), max(x_max, x)
-        y_min, y_max = min(y_min, y), max(y_max, y)
+        x = atom.coord[0]
+        if x < x_min:
+            x_min = x
+        if x > x_max:
+            x_max = x
+
+    for atom in pymol.cmd.get_model("protein").atom:
+        y = atom.coord[1]
+        if y < y_min:
+            y_min = y
+        if y > y_max:
+            y_max = y
 
     step = 3
-    points_on_plane1 = [(x, y, (-plane1[0] * x - plane1[1] * y - plane1[3]) / plane1[2])
-                        for x in np.arange(x_min, x_max + step, step)
-                        for y in np.arange(y_min, y_max + step, step)]
-    
-    points_on_plane2 = [(x, y, (-plane2[0] * x - plane2[1] * y - plane2[3]) / plane2[2])
-                        for x in np.arange(x_min, x_max + step, step)
-                        for y in np.arange(y_min, y_max + step, step)]
+
+    points_on_plane1 = []
+    for x in np.arange(x_min, x_max + step, step):
+        for y in np.arange(y_min, y_max + step, step):
+            # Calculate z coordinate using the plane equation for plane 1
+            z1 = (-plane1[0] * x - plane1[1] * y - plane1[3]) / plane1[2]
+            points_on_plane1.append((x, y, z1))
+
+    # Generate points on plane 2
+    points_on_plane2 = []
+    for x in np.arange(x_min, x_max + step, step):
+        for y in np.arange(y_min, y_max + step, step):
+            # Calculate z coordinate using the plane equation for plane 2
+            z2 = (-plane2[0] * x - plane2[1] * y - plane2[3]) / plane2[2]
+            points_on_plane2.append((x, y, z2))
 
     # Create pseudoatoms for points on plane 1
     for idx, point in enumerate(points_on_plane1):
+        x, y, z = point
         atom_name = f"plane1_{idx}"
-        pymol.cmd.pseudoatom(atom_name, pos=point, color="yellow")
+        pymol.cmd.pseudoatom(atom_name, pos=point, color="white")
         pymol.cmd.show("spheres", f"plane1_{idx}")
 
     # Create pseudoatoms for points on plane 2
     for idx, point in enumerate(points_on_plane2):
+        x, y, z = point
         atom_name = f"plane2_{idx}"
-        pymol.cmd.pseudoatom(atom_name, pos=point, color="yellow")
+        pymol.cmd.pseudoatom(atom_name, pos=point, color="white")
         pymol.cmd.show("spheres", f"plane2_{idx}")
 
     # Mass center
-    atom_name = "mass_center"
-    pymol.cmd.pseudoatom(atom_name, pos=mass_center, color="magenta")
+    if mass_center is not None:
+        atom_name = "mass_center"
+        pymol.cmd.pseudoatom(atom_name, pos=[mass_center[0], mass_center[1], mass_center[2]],
+                             color="magenta")
+        
+    # Show the protein structure
     pymol.cmd.show("spheres", atom_name)
-
     pymol.cmd.show("cartoon", "protein")
-    pymol.cmd.save(f"output_{pdb_file.split('/')[-1].split('.')[0]}.pse")
-
 
 def optimizing_width_membrane(gap_membrane, axis_init, amino_acid_sequence, plane_to_consider):
     """Optimiser la largeur de la membrane en explorant au-dessus et en dessous d'un plan."""
     best_axis = copy.deepcopy(axis_init)
     if plane_to_consider == 1:
-        axis_init.plane1[3] += gap_membrane  # Modifier le terme constant d du plan
+        axis_init['plane1'] = slide_plane(axis_init['plane1'], gap_membrane)
     else:
-        axis_init.plane2[3] += gap_membrane
+        axis_init['plane2'] = slide_plane(axis_init['plane2'], gap_membrane)
 
-    while explore_axis(amino_acid_sequence, axis_init.plane1, axis_init.plane2, best_axis.best_hydrophobicity)[1]:
+    while True:
+        hydrophobicity = explore_axis(amino_acid_sequence, axis_init['plane1'], axis_init['plane2'], ref_axe=axis_init)
+        if hydrophobicity > best_axis['best_hydrophobicity']:
+            best_axis['best_hydrophobicity'] = hydrophobicity
+            best_axis['plane1'] = copy.deepcopy(axis_init['plane1'])
+            best_axis['plane2'] = copy.deepcopy(axis_init['plane2'])
+
+        # Slide the chosen plane again
         if plane_to_consider == 1:
-            axis_init.plane1[3] += gap_membrane
+            axis_init['plane1'] = slide_plane(axis_init['plane1'], gap_membrane)
         else:
-            axis_init.plane2[3] += gap_membrane
+            axis_init['plane2'] = slide_plane(axis_init['plane2'], gap_membrane)
+
+        # Exit condition if no improvement
+        if not hydrophobicity:
+            break
 
     return best_axis
-
-
-# ============================= Main Program ==============================
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -276,7 +350,7 @@ if __name__ == '__main__':
     gap = args.gap
     gap_membrane = args.gap_membrane
       
-    print(f"Command : python TM_detect.py {filename} -n {n} -w {width} -g {gap} -m {gap_membrane}")
+    print(f"Command : python hope.py {filename} -n {n} -w {width} -g {gap} -m {gap_membrane}")
 
     # Vérification du fichier d'entrée
     check_input_file(filename)
@@ -290,39 +364,34 @@ if __name__ == '__main__':
     print("Calculating the planes... ")
     for d in directions:
         point = copy.deepcopy(d)
-        normal = find_director_vector(point, protein['mass_center'])
-        plane1 = define_plane(point, normal)
-        plane2 = define_plane(point, normal)
-        plane2[3] += width  # Ajuster pour la largeur initiale de la membrane
+        normal = find_director_vector(point=point, center_coordinate=protein['mass_center'])
+        plane1 = define_plane(point=point, normal_vector=normal)
+        plane2 = complementary_plane(plane1, gap=width)
 
-        best_axis_tmp = {'plane1': plane1, 'plane2': plane2, 'best_hydrophobicity': -1000}
+        # Create an axis for exploration
+        axis = create_axis(plane1, plane2)
+        best_axis_tmp = copy.deepcopy(axis)
         
         # Exploration de l'axe
-        while explore_axis(protein['amino_acid_sequence'], plane1, plane2, best_axis_tmp['best_hydrophobicity'])[1]:
-            plane1[3] += gap
-            plane2[3] += gap
-        
-        plane1 = define_plane(point, normal)
-        plane2 = define_plane(point, normal)
-        plane2[3] += width
-        
-        while explore_axis(protein['amino_acid_sequence'], plane1, plane2, best_axis_tmp['best_hydrophobicity'])[1]:
-            plane1[3] -= gap
-            plane2[3] -= gap
-        
+        while explore_axis(protein['amino_acid_sequence'], axis["plane1"], axis["plane2"], ref_axe=best_axis_tmp) :
+            axis = create_axis(slide_plane(axis["plane1"], gap), slide_plane(axis["plane2"], gap))
+
+        # Save the best axis position
         protein['best_positions'].append(best_axis_tmp)
     
     # Trouver le meilleur axe
-    best_axis = max(protein['best_positions'], key=lambda x: x['best_hydrophobicity'], default=None)
+    best_axis = find_best_axis(protein)
     if best_axis is None:
         print("Something went wrong... Try to modify the values of parameters.")
         sys.exit(1)
+    
+    print(f"Best axis found: {best_axis}")
 
     print("Optimising membrane width...")
-    best_axis_tmp = optimizing_width_membrane(gap_membrane, best_axis, protein['amino_acid_sequence'], 2)
-    best_axis_tmp2 = optimizing_width_membrane(-gap_membrane, best_axis_tmp, protein['amino_acid_sequence'], 2)
-    best_axis_tmp3 = optimizing_width_membrane(gap_membrane, best_axis_tmp2, protein['amino_acid_sequence'], 1)
-    best_axis_tmp4 = optimizing_width_membrane(-gap_membrane, best_axis_tmp3, protein['amino_acid_sequence'], 1)
+    best_axis_tmp = optimizing_width_membrane(gap_membrane=gap_membrane, axis_init=best_axis, amino_acid_sequence=protein['amino_acid_sequence'], plane_to_consider=2)
+    best_axis_tmp2 = optimizing_width_membrane(gap_membrane=-gap_membrane, axis_init=best_axis_tmp, amino_acid_sequence=protein['amino_acid_sequence'], plane_to_consider=2)
+    best_axis_tmp3 = optimizing_width_membrane(gap_membrane=gap_membrane, axis_init=best_axis_tmp2, amino_acid_sequence=protein['amino_acid_sequence'], plane_to_consider=1)
+    best_axis_tmp4 = optimizing_width_membrane(gap_membrane=-gap_membrane, axis_init=best_axis_tmp3, amino_acid_sequence=protein['amino_acid_sequence'], plane_to_consider=1)
 
     print("The membrane width is ", abs(best_axis_tmp4['plane1'][3] - best_axis_tmp4['plane2'][3]))
     print("Best axis found overall is", best_axis_tmp4)
