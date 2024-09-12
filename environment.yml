@@ -1,14 +1,12 @@
 name: transmembrane_detection_PC
 channels:
-  - schrodinger
   - salilab
   - bioconda
   - conda-forge
   - defaults
 dependencies:
   - biopython
-  - dssp
-  - libboost
-  - numpy
-  - pymol
   - python
+  - numpy
+  - dssp
+  - pymol
